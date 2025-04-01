@@ -69,4 +69,4 @@ This script is provided as-is. Use it at your own risk. Always test in a staging
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [GPL3.0](LICENSE).
