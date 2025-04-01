@@ -95,7 +95,7 @@ fi
 
 # Clean up existing Teleport files
 display_message "Cleaning up existing Teleport files"
-rm -f /var/lib/teleport/* || { display_message "Failed to clean up /var/lib/teleport/"; exit 1; }
+rm -rf /var/lib/teleport/* || { display_message "Failed to clean up /var/lib/teleport/"; exit 1; }
 rm -f /etc/teleport.yaml || { display_message "Failed to remove /etc/teleport.yaml"; exit 1; }
 
 # Copy new SSL certificates
