@@ -1,0 +1,134 @@
+#!/bin/bash
+# Script to renew SSL certificates for Teleport
+# This script is intended to be run on a server with Teleport installed, 
+# that is using systemd for service management, subdomain for the Teleport service,
+# and configured to use Let's Encrypt for SSL certificates.
+# It will stop the Teleport service, renew the SSL certificate, and restart the service.
+# Make sure to run this script with root privileges.
+#
+# Usage: ./teleport_ssl_renew <subdomain>
+# Example: ./teleport_ssl_renew example.yourdomain.com
+
+# Function to display messages
+display_message() {
+    echo "===================================="
+    echo "$1"
+    echo "===================================="
+}
+
+# Check if the user is root
+if [ "$EUID" -ne 0 ]; then
+    display_message "Please run this script as root or using sudo."
+    exit 1
+fi
+
+# Check if certbot is installed
+if ! command -v certbot &> /dev/null; then
+    display_message "certbot could not be found. Please install certbot first."
+    exit 1
+fi
+
+# Check if Teleport is installed
+if ! command -v teleport &> /dev/null; then
+    display_message "Teleport could not be found. Please install Teleport first."
+    exit 1
+fi
+
+# Check if systemctl is available
+if ! command -v systemctl &> /dev/null; then
+    display_message "systemctl could not be found. Please run this script on a system with systemd."
+    exit 1
+fi
+
+# Check if the script is run with a subdomain argument
+if [ -z "$1" ]; then
+    display_message "No subdomain provided. Please provide a subdomain as an argument."
+    display_message "Usage: $0 <subdomain>"
+    exit 1
+fi
+
+# Check if the subdomain is valid
+if ! [[ "$1" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+    display_message "Invalid subdomain format. Please provide a valid subdomain."
+    display_message "Example of a valid subdomain: example.yourdomain.com"
+    exit 1
+fi
+
+# Prompt the user to confirm before proceeding
+display_message "You have entered the subdomain: $1"
+read -p "Do you want to continue with this subdomain? (yes/no): " confirmation
+if [[ "$confirmation" != "yes" ]]; then
+    display_message "Operation canceled by the user."
+    exit 0
+fi
+
+# Set the subdomain variable
+subdomain="$1"
+
+# Check if the subdomain is reachable
+if ! ping -c 1 "$subdomain" &> /dev/null; then
+    display_message "The subdomain $subdomain is not reachable. Please check your network connection."
+    exit 1
+fi
+
+# Renew SSL certificate
+display_message "Renewing SSL certificate for $subdomain"
+if ! certbot certonly --standalone -d "$subdomain"; then
+    display_message "Certbot failed to renew the certificate. Please check the logs."
+    exit 1
+fi
+
+# Check if the SSL certificate is valid
+if certbot certificates | grep -q "$subdomain"; then
+    display_message "SSL certificate for $subdomain is valid."
+else
+    display_message "SSL certificate for $subdomain is not valid. Please check the logs for more details."
+    exit 1
+fi
+
+# Stop Teleport service
+display_message "Stopping Teleport service"
+if ! systemctl stop teleport; then
+    display_message "Failed to stop Teleport service. Please check the logs."
+    exit 1
+fi
+
+# Clean up existing Teleport files
+display_message "Cleaning up existing Teleport files"
+rm -f /var/lib/teleport/* || { display_message "Failed to clean up /var/lib/teleport/"; exit 1; }
+rm -f /etc/teleport.yaml || { display_message "Failed to remove /etc/teleport.yaml"; exit 1; }
+
+# Copy new SSL certificates
+display_message "Copying new SSL certificates"
+cp /etc/letsencrypt/live/"$subdomain"/fullchain.pem /var/lib/teleport/ || { display_message "Failed to copy fullchain.pem"; exit 1; }
+cp /etc/letsencrypt/live/"$subdomain"/privkey.pem /var/lib/teleport/ || { display_message "Failed to copy privkey.pem"; exit 1; }
+
+# Configure Teleport
+display_message "Configuring Teleport"
+if ! teleport configure -o file --cluster-name="$subdomain" --public-addr="$subdomain":443 --cert-file=/var/lib/teleport/fullchain.pem --key-file=/var/lib/teleport/privkey.pem; then
+    display_message "Failed to configure Teleport. Please check the logs."
+    exit 1
+fi
+
+# Restart Teleport service
+display_message "Restarting Teleport service"
+systemctl restart teleport
+sleep 5  # Allow time for the service to start
+
+if systemctl is-active --quiet teleport; then
+    display_message "Teleport service is running."
+    display_message "Teleport SSL renewal process completed successfully!"
+else
+    display_message "Teleport service failed to start. Please check the logs for more details."
+    exit 1
+fi
+
+# Check if the Teleport service is reachable
+if curl -s --head --request GET "https://$subdomain" | grep "200 OK" > /dev/null; then
+    display_message "Teleport service is reachable at https://$subdomain"
+else
+    display_message "Teleport service is not reachable at https://$subdomain. Please check the logs for more details."
+    display_message "To check the Teleport logs, use the following command:"
+    display_message "journalctl -u teleport -e"
+    exit 1
+fi
