@@ -9,11 +9,91 @@
 # Usage: ./teleport_ssl_renew <subdomain>
 # Example: ./teleport_ssl_renew example.yourdomain.com
 
-# Function to display messages
+# Set strict error handling
+set -euo pipefail
+
+# Configuration
+BACKUP_DIR="/var/lib/teleport/backup"
+LOG_FILE="/var/log/teleport_ssl_renew.log"
+SERVICE_TIMEOUT=30  # seconds
+CERT_EXPIRY_THRESHOLD=30  # days
+
+# Function to display messages and log them
 display_message() {
+    local message="$1"
     echo "===================================="
-    echo "$1"
+    echo "$message"
     echo "===================================="
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" >> "$LOG_FILE"
+}
+
+# Function to create backup
+create_backup() {
+    display_message "Creating backup of existing configuration"
+    mkdir -p "$BACKUP_DIR"
+    if [ -d "/var/lib/teleport" ]; then
+        tar -czf "$BACKUP_DIR/teleport_backup_$(date +%Y%m%d_%H%M%S).tar.gz" -C /var/lib/teleport . 2>> "$LOG_FILE" || {
+            display_message "Failed to create backup"
+            return 1
+        }
+    fi
+    if [ -f "/etc/teleport.yaml" ]; then
+        cp /etc/teleport.yaml "$BACKUP_DIR/teleport.yaml.backup" 2>> "$LOG_FILE" || {
+            display_message "Failed to backup teleport.yaml"
+            return 1
+        }
+    fi
+}
+
+# Function to restore from backup
+restore_backup() {
+    display_message "Restoring from backup"
+    local latest_backup=$(ls -t "$BACKUP_DIR"/teleport_backup_*.tar.gz 2>/dev/null | head -n1)
+    if [ -n "$latest_backup" ]; then
+        tar -xzf "$latest_backup" -C /var/lib/teleport 2>> "$LOG_FILE" || {
+            display_message "Failed to restore backup"
+            return 1
+        }
+    fi
+    if [ -f "$BACKUP_DIR/teleport.yaml.backup" ]; then
+        cp "$BACKUP_DIR/teleport.yaml.backup" /etc/teleport.yaml 2>> "$LOG_FILE" || {
+            display_message "Failed to restore teleport.yaml"
+            return 1
+        }
+    fi
+}
+
+# Function to check certificate expiry
+check_cert_expiry() {
+    local cert_file="/etc/letsencrypt/live/$1/cert.pem"
+    if [ -f "$cert_file" ]; then
+        local expiry_date=$(openssl x509 -enddate -noout -in "$cert_file" | cut -d= -f2)
+        local expiry_epoch=$(date -d "$expiry_date" +%s)
+        local current_epoch=$(date +%s)
+        local days_until_expiry=$(( ($expiry_epoch - $current_epoch) / 86400 ))
+        
+        if [ "$days_until_expiry" -gt "$CERT_EXPIRY_THRESHOLD" ]; then
+            display_message "Certificate is still valid for $days_until_expiry days. No renewal needed."
+            return 1
+        fi
+        return 0
+    fi
+    return 0
+}
+
+# Function to wait for service with timeout
+wait_for_service() {
+    local service=$1
+    local timeout=$2
+    local start_time=$(date +%s)
+    
+    while [ $(($(date +%s) - start_time)) -lt "$timeout" ]; do
+        if systemctl is-active --quiet "$service"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 # Check if the user is root
@@ -65,6 +145,24 @@ fi
 # Set the subdomain variable
 subdomain="$1"
 
+# Create backup before proceeding
+create_backup || {
+    display_message "Failed to create backup. Aborting."
+    exit 1
+}
+
+# Check certificate expiry
+if check_cert_expiry "$subdomain"; then
+    display_message "Certificate needs renewal"
+else
+    display_message "Certificate is still valid. Do you want to force renewal? (yes/no)"
+    read -r force_renewal
+    if [[ "$force_renewal" != "yes" ]]; then
+        display_message "Operation canceled by user."
+        exit 0
+    fi
+fi
+
 # Check if the subdomain is reachable
 if ! ping -c 1 "$subdomain" &> /dev/null; then
     display_message "The subdomain $subdomain is not reachable. Please check your network connection."
@@ -86,10 +184,21 @@ else
     exit 1
 fi
 
-# Stop Teleport service
+# Stop Teleport service with timeout
 display_message "Stopping Teleport service"
 if ! systemctl stop teleport; then
-    display_message "Failed to stop Teleport service. Please check the logs."
+    display_message "Failed to stop Teleport service. Attempting to force stop..."
+    systemctl kill teleport || {
+        display_message "Failed to force stop Teleport service. Restoring from backup..."
+        restore_backup
+        exit 1
+    }
+fi
+
+# Wait for service to stop
+if ! wait_for_service "teleport" "$SERVICE_TIMEOUT"; then
+    display_message "Teleport service failed to stop within timeout. Restoring from backup..."
+    restore_backup
     exit 1
 fi
 
@@ -110,10 +219,15 @@ if ! teleport configure -o file --cluster-name="$subdomain" --public-addr="$subd
     exit 1
 fi
 
-# Restart Teleport service
+# Restart Teleport service with timeout
 display_message "Restarting Teleport service"
 systemctl restart teleport
-sleep 5  # Allow time for the service to start
+
+if ! wait_for_service "teleport" "$SERVICE_TIMEOUT"; then
+    display_message "Teleport service failed to start within timeout. Restoring from backup..."
+    restore_backup
+    exit 1
+fi
 
 if systemctl is-active --quiet teleport; then
     display_message "Teleport service is running."
