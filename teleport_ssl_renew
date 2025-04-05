@@ -85,7 +85,8 @@ check_cert_expiry() {
 wait_for_service() {
     local service=$1
     local timeout=$2
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
     
     while [ $(($(date +%s) - start_time)) -lt "$timeout" ]; do
         if systemctl is-active --quiet "$service"; then
