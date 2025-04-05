@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # Configuration
-BACKUP_DIR="/var/lib/teleport/backup"
+BACKUP_DIR="$HOME/teleport_backup"
 LOG_FILE="/var/log/teleport_ssl_renew.log"
 SERVICE_TIMEOUT=30  # seconds
 CERT_EXPIRY_THRESHOLD=30  # days
